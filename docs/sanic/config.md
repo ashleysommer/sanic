@@ -1,6 +1,6 @@
 # Configuration
 
-Any reasonably complex application will need configuration that is not baked into the acutal code. Settings might be different for different environments or installations.
+Any reasonably complex application will need configuration that is not baked into the actual code. Settings might be different for different environments or installations.
 
 ## Basics
 
@@ -66,7 +66,7 @@ $ MYAPP_SETTINGS=/path/to/config_file python3 myapp.py
 INFO: Goin' Fast @ http://0.0.0.0:8000
 ```
 
-The config files are regular Python files which are executed in order to load them. This allows you to use arbitrary logic for constructing the right configuration. Only uppercase varibales are added to the configuration. Most commonly the configuration consists of simple key value pairs:
+The config files are regular Python files which are executed in order to load them. This allows you to use arbitrary logic for constructing the right configuration. Only uppercase variables are added to the configuration. Most commonly the configuration consists of simple key value pairs:
 
 ```
 # config_file
@@ -83,3 +83,4 @@ Out of the box there are just a few predefined values which can be overwritten w
     | ----------------- | --------- | --------------------------------- |
     | REQUEST_MAX_SIZE  | 100000000 | How big a request may be (bytes)  |
     | REQUEST_TIMEOUT   | 60        | How long a request can take (sec) |
+    | KEEP_ALIVE        | True      | Disables keep-alive when False    |

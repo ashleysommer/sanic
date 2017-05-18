@@ -1,3 +1,5 @@
+import sys
+import json
 from cgi import parse_header
 from collections import namedtuple
 from http.cookies import SimpleCookie
@@ -7,7 +9,12 @@ from urllib.parse import parse_qs, urlunparse
 try:
     from ujson import loads as json_loads
 except ImportError:
-    from json import loads as json_loads
+    if sys.version_info[:2] == (3, 5):
+        def json_loads(data):
+            # on Python 3.5 json.loads only supports str not bytes
+            return json.loads(data.decode())
+    else:
+        json_loads = json.loads
 
 from sanic.exceptions import InvalidUsage
 from sanic.log import log
@@ -38,7 +45,7 @@ class Request(dict):
     __slots__ = (
         'app', 'headers', 'version', 'method', '_cookies', 'transport',
         'body', 'parsed_json', 'parsed_args', 'parsed_form', 'parsed_files',
-        '_ip', '_parsed_url',
+        '_ip', '_parsed_url', 'uri_template'
     )
 
     def __init__(self, url_bytes, headers, version, method, transport):
@@ -57,6 +64,7 @@ class Request(dict):
         self.parsed_form = None
         self.parsed_files = None
         self.parsed_args = None
+        self.uri_template = None
         self._cookies = None
 
     @property
@@ -78,9 +86,10 @@ class Request(dict):
         :return: token related to request
         """
         auth_header = self.headers.get('Authorization')
-        if auth_header is not None:
-            return auth_header.split()[1]
-        return auth_header
+        if auth_header is not None and 'Token ' in auth_header:
+            return auth_header.partition('Token ')[-1]
+        else:
+            return auth_header
 
     @property
     def form(self):
@@ -141,7 +150,8 @@ class Request(dict):
     @property
     def ip(self):
         if not hasattr(self, '_ip'):
-            self._ip = self.transport.get_extra_info('peername')
+            self._ip = (self.transport.get_extra_info('peername') or
+                        (None, None))
         return self._ip
 
     @property

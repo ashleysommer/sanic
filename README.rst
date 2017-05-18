@@ -1,5 +1,5 @@
 Sanic
-=================================
+=====
 
 |Join the chat at https://gitter.im/sanic-python/Lobby| |Build Status| |PyPI| |PyPI version|
 
@@ -8,6 +8,8 @@ Sanic is a Flask-like Python 3.5+ web server that's written to go fast.  It's ba
 On top of being Flask-like, Sanic supports async request handlers.  This means you can use the new shiny async/await syntax from Python 3.5, making your code non-blocking and speedy.
 
 Sanic is developed `on GitHub <https://github.com/channelcat/sanic/>`_. Contributions are welcome!
+
+If you have a project that utilizes Sanic make sure to comment on the `issue <https://github.com/channelcat/sanic/issues/396>`_ that we use to track those projects!
 
 Benchmarks
 ----------
@@ -84,8 +86,9 @@ Documentation
 
 TODO
 ----
-* Streamed file processing
-* http2
+ * Streamed file processing
+ * http2
+
 Limitations
 -----------
 * No wheels for uvloop and httptools on Windows :(

@@ -28,14 +28,17 @@ if __name__ == "__main__":
             raise ValueError("Module is not a Sanic app, it is a {}.  "
                              "Perhaps you meant {}.app?"
                              .format(type(app).__name__, args.module))
+        if args.cert is not None or args.key is not None:
+            ssl = {'cert': args.cert, 'key': args.key}
+        else:
+            ssl = None
 
         app.run(host=args.host, port=args.port,
-                workers=args.workers, debug=args.debug,
-                cert=args.cert, key=args.key)
-    except ImportError:
+                workers=args.workers, debug=args.debug, ssl=ssl)
+    except ImportError as e:
         log.error("No module named {} found.\n"
                   "  Example File: project/sanic_server.py -> app\n"
                   "  Example Module: project.sanic_server.app"
-                  .format(module_name))
+                  .format(e.name))
     except ValueError as e:
         log.error("{}".format(e))

@@ -129,7 +129,7 @@ class StreamingHTTPResponse(BaseHTTPResponse):
             data = self._encode_body(data)
 
         self.transport.write(
-            b"%b\r\n%b\r\n" % (str(len(data)).encode(), data))
+            b"%x\r\n%b\r\n" % (len(data), data))
 
     async def stream(
             self, version="1.1", keep_alive=False, keep_alive_timeout=None):
@@ -210,7 +210,7 @@ class HTTPResponse(BaseHTTPResponse):
         # Speeds up response rate 6% over pulling from all
         status = COMMON_STATUS_CODES.get(self.status)
         if not status:
-            status = ALL_STATUS_CODES.get(self.status)
+            status = ALL_STATUS_CODES.get(self.status, b'UNKNOWN RESPONSE')
 
         return (b'HTTP/%b %d %b\r\n'
                 b'Connection: %b\r\n'

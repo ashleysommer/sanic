@@ -8,7 +8,7 @@ from sanic.views import CompositionView
 
 Route = namedtuple(
     'Route',
-    ['handler', 'methods', 'pattern', 'parameters', 'name'])
+    ['handler', 'methods', 'pattern', 'parameters', 'name', 'uri'])
 Parameter = namedtuple('Parameter', ['name', 'cast'])
 
 REGEX_TYPES = {
@@ -16,6 +16,7 @@ REGEX_TYPES = {
     'int': (int, r'\d+'),
     'number': (float, r'[0-9\\.]+'),
     'alpha': (str, r'[A-Za-z]+'),
+    'path': (str, r'[^/].*?'),
 }
 
 ROUTER_CACHE_SIZE = 1024
@@ -71,7 +72,8 @@ class Router:
         self.routes_always_check = []
         self.hosts = set()
 
-    def parse_parameter_string(self, parameter_string):
+    @classmethod
+    def parse_parameter_string(cls, parameter_string):
         """Parse a parameter string into its constituent name, type, and
         pattern
 
@@ -161,10 +163,10 @@ class Router:
             parameters.append(parameter)
 
             # Mark the whole route as unhashable if it has the hash key in it
-            if re.search('(^|[^^]){1}/', pattern):
+            if re.search(r'(^|[^^]){1}/', pattern):
                 properties['unhashable'] = True
             # Mark the route as unhashable if it matches the hash key
-            elif re.search(pattern, '/'):
+            elif re.search(r'/', pattern):
                 properties['unhashable'] = True
 
             return '({})'.format(pattern)
@@ -223,7 +225,7 @@ class Router:
 
             route = Route(
                 handler=handler, methods=methods, pattern=pattern,
-                parameters=parameters, name=handler_name)
+                parameters=parameters, name=handler_name, uri=uri)
 
         self.routes_all[uri] = route
         if properties['unhashable']:
@@ -342,4 +344,4 @@ class Router:
         route_handler = route.handler
         if hasattr(route_handler, 'handlers'):
             route_handler = route_handler.handlers[method]
-        return route_handler, [], kwargs
+        return route_handler, [], kwargs, route.uri

@@ -133,6 +133,17 @@ def test_query_string():
     assert request.args.get('test2') == 'false'
 
 
+def test_uri_template():
+    app = Sanic('test_uri_template')
+
+    @app.route('/foo/<id:int>/bar/<name:[A-z]+>')
+    async def handler(request):
+        return text('OK')
+
+    request, response = app.test_client.get('/foo/123/bar/baz')
+    assert request.uri_template == '/foo/<id:int>/bar/<name:[A-z]+>'
+
+
 def test_token():
     app = Sanic('test_post_token')
 
@@ -144,12 +155,42 @@ def test_token():
     token = 'a1d895e0-553a-421a-8e22-5ff8ecb48cbf'
     headers = {
         'content-type': 'application/json',
+        'Authorization': '{}'.format(token)
+    }
+
+    request, response = app.test_client.get('/', headers=headers)
+
+    assert request.token == token
+
+    token = 'a1d895e0-553a-421a-8e22-5ff8ecb48cbf'
+    headers = {
+        'content-type': 'application/json',
         'Authorization': 'Token {}'.format(token)
     }
 
     request, response = app.test_client.get('/', headers=headers)
 
     assert request.token == token
+
+    token = 'a1d895e0-553a-421a-8e22-5ff8ecb48cbf'
+    headers = {
+        'content-type': 'application/json',
+        'Authorization': 'Bearer Token {}'.format(token)
+    }
+
+    request, response = app.test_client.get('/', headers=headers)
+
+    assert request.token == token
+
+    # no Authorization headers
+    headers = {
+        'content-type': 'application/json'
+    }
+
+    request, response = app.test_client.get('/', headers=headers)
+
+    assert request.token is None
+
 
 # ------------------------------------------------------------ #
 #  POST

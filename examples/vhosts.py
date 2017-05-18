@@ -1,4 +1,4 @@
-from sanic.response import text
+from sanic import response
 from sanic import Sanic
 from sanic.blueprints import Blueprint
 
@@ -15,25 +15,21 @@ bp = Blueprint("bp", host="bp.example.com")
                       "somethingelse.com",
                       "therestofyourdomains.com"])
 async def hello(request):
-    return text("Some defaults")
-
-@app.route('/', host="example.com")
-async def hello(request):
-    return text("Answer")
+    return response.text("Some defaults")
 
 @app.route('/', host="sub.example.com")
 async def hello(request):
-    return text("42")
+    return response.text("42")
 
 @bp.route("/question")
 async def hello(request):
-    return text("What is the meaning of life?")
+    return response.text("What is the meaning of life?")
 
 @bp.route("/answer")
 async def hello(request):
-    return text("42")
+    return response.text("42")
 
-app.register_blueprint(bp)
+app.blueprint(bp)
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000)

@@ -3,12 +3,17 @@ import sys
 import signal
 import asyncio
 import logging
+
 try:
     import ssl
 except ImportError:
     ssl = None
 
-import uvloop
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
 import gunicorn.workers.base as base
 
 from sanic.server import trigger_events, serve, HttpProtocol, Signal
@@ -33,7 +38,6 @@ class GunicornWorker(base.Worker):
         # create new event_loop after fork
         asyncio.get_event_loop().close()
 
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
@@ -50,8 +54,8 @@ class GunicornWorker(base.Worker):
             debug=is_debug,
             protocol=protocol,
             ssl=self.ssl_context,
-            run_async=True
-        )
+            run_async=True)
+        self._server_settings['signal'] = self.signal
         self._server_settings.pop('sock')
         trigger_events(self._server_settings.get('before_start', []),
                        self.loop)
@@ -97,7 +101,6 @@ class GunicornWorker(base.Worker):
             self.servers.append(await serve(
                 sock=sock,
                 connections=self.connections,
-                signal=self.signal,
                 **self._server_settings
             ))
 

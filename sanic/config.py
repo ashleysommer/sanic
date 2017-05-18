@@ -1,12 +1,105 @@
 import os
-
+import sys
+import syslog
+import platform
 import types
+
+from sanic.log import DefaultFilter
 
 SANIC_PREFIX = 'SANIC_'
 
+_address_dict = {
+    'Windows': ('localhost', 514),
+    'Darwin': '/var/run/syslog',
+    'Linux': '/dev/log',
+    'FreeBSD': '/dev/log'
+}
+
+LOGGING = {
+    'version': 1,
+    'filters': {
+        'accessFilter': {
+            '()': DefaultFilter,
+            'param': [0, 10, 20]
+        },
+        'errorFilter': {
+            '()': DefaultFilter,
+            'param': [30, 40, 50]
+        }
+    },
+    'formatters': {
+        'simple': {
+            'format': '%(asctime)s - (%(name)s)[%(levelname)s]: %(message)s',
+            'datefmt': '%Y-%m-%d %H:%M:%S'
+        },
+        'access': {
+            'format': '%(asctime)s - (%(name)s)[%(levelname)s][%(host)s]: ' +
+                      '%(request)s %(message)s %(status)d %(byte)d',
+            'datefmt': '%Y-%m-%d %H:%M:%S'
+        }
+    },
+    'handlers': {
+        'internal': {
+            'class': 'logging.StreamHandler',
+            'filters': ['accessFilter'],
+            'formatter': 'simple',
+            'stream': sys.stderr
+        },
+        'accessStream': {
+            'class': 'logging.StreamHandler',
+            'filters': ['accessFilter'],
+            'formatter': 'access',
+            'stream': sys.stderr
+        },
+        'errorStream': {
+            'class': 'logging.StreamHandler',
+            'filters': ['errorFilter'],
+            'formatter': 'simple',
+            'stream': sys.stderr
+        },
+        # before you use accessSysLog, be sure that log levels
+        # 0, 10, 20 have been enabled in you syslog configuration
+        # otherwise you won't be able to see the output in syslog
+        # logging file.
+        'accessSysLog': {
+            'class': 'logging.handlers.SysLogHandler',
+            'address': _address_dict.get(platform.system(),
+                                         ('localhost', 514)),
+            'facility': syslog.LOG_DAEMON,
+            'filters': ['accessFilter'],
+            'formatter': 'access'
+        },
+        'errorSysLog': {
+            'class': 'logging.handlers.SysLogHandler',
+            'address': _address_dict.get(platform.system(),
+                                         ('localhost', 514)),
+            'facility': syslog.LOG_DAEMON,
+            'filters': ['errorFilter'],
+            'formatter': 'simple'
+        },
+    },
+    'loggers': {
+        'sanic': {
+            'level': 'DEBUG',
+            'handlers': ['internal', 'errorStream']
+        },
+        'network': {
+            'level': 'DEBUG',
+            'handlers': ['accessStream', 'errorStream']
+        }
+    }
+}
+
+# this happens when using container or systems without syslog
+# keep things in config would cause file not exists error
+_addr = LOGGING['handlers']['accessSysLog']['address']
+if type(_addr) is str and not os.path.exists(_addr):
+    LOGGING['handlers'].pop('accessSysLog')
+    LOGGING['handlers'].pop('errorSysLog')
+
 
 class Config(dict):
-    def __init__(self, defaults=None, load_env=True):
+    def __init__(self, defaults=None, load_env=True, keep_alive=True):
         super().__init__(defaults or {})
         self.LOGO = """
                  ▄▄▄▄▄
@@ -31,6 +124,7 @@ class Config(dict):
 """
         self.REQUEST_MAX_SIZE = 100000000  # 100 megababies
         self.REQUEST_TIMEOUT = 60  # 60 seconds
+        self.KEEP_ALIVE = keep_alive
 
         if load_env:
             self.load_environment_vars()
@@ -98,11 +192,11 @@ class Config(dict):
                 self[key] = getattr(obj, key)
 
     def load_environment_vars(self):
+        """
+        Looks for any SANIC_ prefixed environment variables and applies
+        them to the configuration if present.
+        """
         for k, v in os.environ.items():
-            """
-            Looks for any SANIC_ prefixed environment variables and applies
-            them to the configuration if present.
-            """
             if k.startswith(SANIC_PREFIX):
                 _, config_key = k.split(SANIC_PREFIX, 1)
                 self[config_key] = v

@@ -1,4 +1,5 @@
 import logging
+import logging.config
 import re
 import warnings
 from asyncio import get_event_loop, ensure_future, CancelledError
@@ -7,16 +8,16 @@ from functools import partial
 from inspect import isawaitable, stack, getmodulename
 from traceback import format_exc
 from urllib.parse import urlencode, urlunparse
-from ssl import create_default_context
+from ssl import create_default_context, Purpose
 
-from sanic.config import Config
+from sanic.config import Config, LOGGING
 from sanic.constants import HTTP_METHODS
 from sanic.exceptions import ServerError, URLBuildError, SanicException
 from sanic.handlers import ErrorHandler
 from sanic.log import log
 from sanic.response import HTTPResponse, StreamingHTTPResponse
 from sanic.router import Router
-from sanic.server import serve, serve_multiple, HttpProtocol
+from sanic.server import serve, serve_multiple, HttpProtocol, Signal
 from sanic.static import register as static_register
 from sanic.testing import SanicTestClient
 from sanic.views import CompositionView
@@ -26,7 +27,10 @@ from sanic.websocket import WebSocketProtocol, ConnectionClosed
 class Sanic:
 
     def __init__(self, name=None, router=None, error_handler=None,
-                 load_env=True):
+                 load_env=True, request_class=None,
+                 log_config=LOGGING):
+        if log_config:
+            logging.config.dictConfig(log_config)
         # Only set up a default log handler if the
         # end-user application didn't set anything up.
         if not logging.root.handlers and log.level == logging.NOTSET:
@@ -44,8 +48,10 @@ class Sanic:
 
         self.name = name
         self.router = router or Router()
+        self.request_class = request_class
         self.error_handler = error_handler or ErrorHandler()
         self.config = Config(load_env=load_env)
+        self.log_config = log_config
         self.request_middleware = deque()
         self.response_middleware = deque()
         self.blueprints = {}
@@ -200,7 +206,12 @@ class Sanic:
         def response(handler):
             async def websocket_handler(request, *args, **kwargs):
                 request.app = self
-                protocol = request.transport.get_protocol()
+                try:
+                    protocol = request.transport.get_protocol()
+                except AttributeError:
+                    # On Python3.5 the Transport classes in asyncio do not
+                    # have a get_protocol() method as in uvloop
+                    protocol = request.transport._protocol
                 ws = await protocol.websocket_handshake(request)
 
                 # schedule the application handler
@@ -287,7 +298,7 @@ class Sanic:
                            attach_to=middleware_or_request)
 
     # Static Files
-    def static(self, uri, file_or_directory, pattern='.+',
+    def static(self, uri, file_or_directory, pattern=r'/?.+',
                use_modified_since=True, use_content_range=False):
         """Register a root to serve files from. The input can either be a
         file or a directory. See
@@ -444,17 +455,7 @@ class Sanic:
             # -------------------------------------------- #
 
             request.app = self
-
-            response = False
-            # The if improves speed.  I don't know why
-            if self.request_middleware:
-                for middleware in self.request_middleware:
-                    response = middleware(request)
-                    if isawaitable(response):
-                        response = await response
-                    if response:
-                        break
-
+            response = await self._run_request_middleware(request)
             # No middleware results
             if not response:
                 # -------------------------------------------- #
@@ -462,7 +463,8 @@ class Sanic:
                 # -------------------------------------------- #
 
                 # Fetch handler from router
-                handler, args, kwargs = self.router.get(request)
+                handler, args, kwargs, uri = self.router.get(request)
+                request.uri_template = uri
                 if handler is None:
                     raise ServerError(
                         ("'None' was returned while requesting a "
@@ -472,20 +474,6 @@ class Sanic:
                 response = handler(request, *args, **kwargs)
                 if isawaitable(response):
                     response = await response
-
-            # -------------------------------------------- #
-            # Response Middleware
-            # -------------------------------------------- #
-
-            if self.response_middleware:
-                for middleware in self.response_middleware:
-                    _response = middleware(request, response)
-                    if isawaitable(_response):
-                        _response = await _response
-                    if _response:
-                        response = _response
-                        break
-
         except Exception as e:
             # -------------------------------------------- #
             # Response Generation Failed
@@ -503,6 +491,17 @@ class Sanic:
                 else:
                     response = HTTPResponse(
                         "An error occurred while handling an error")
+        finally:
+            # -------------------------------------------- #
+            # Response Middleware
+            # -------------------------------------------- #
+            try:
+                response = await self._run_response_middleware(request,
+                                                               response)
+            except:
+                log.exception(
+                    'Exception occured in one of response middleware handlers'
+                )
 
         # pass the response to the correct callback
         if isinstance(response, StreamingHTTPResponse):
@@ -522,36 +521,29 @@ class Sanic:
     # Execution
     # -------------------------------------------------------------------- #
 
-    def run(self, host="127.0.0.1", port=8000, debug=False, before_start=None,
-            after_start=None, before_stop=None, after_stop=None, ssl=None,
-            sock=None, workers=1, loop=None, protocol=None,
-            backlog=100, stop_event=None, register_sys_signals=True):
+    def run(self, host="127.0.0.1", port=8000, debug=False, ssl=None,
+            sock=None, workers=1, protocol=None,
+            backlog=100, stop_event=None, register_sys_signals=True,
+            log_config=LOGGING):
         """Run the HTTP Server and listen until keyboard interrupt or term
         signal. On termination, drain connections before closing.
 
         :param host: Address to host on
         :param port: Port to host on
         :param debug: Enables debug output (slows server)
-        :param before_start: Functions to be executed before the server starts
-                            accepting connections
-        :param after_start: Functions to be executed after the server starts
-                            accepting connections
-        :param before_stop: Functions to be executed when a stop signal is
-                            received before it is respected
-        :param after_stop: Functions to be executed when all requests are
-                            complete
         :param ssl: SSLContext, or location of certificate and key
                             for SSL encryption of worker(s)
         :param sock: Socket for the server to accept connections from
         :param workers: Number of processes
                             received before it is respected
-        :param loop:
         :param backlog:
         :param stop_event:
         :param register_sys_signals:
         :param protocol: Subclass of asyncio protocol class
         :return: Nothing
         """
+        if log_config:
+            logging.config.dictConfig(log_config)
         if protocol is None:
             protocol = (WebSocketProtocol if self.websocket_enabled
                         else HttpProtocol)
@@ -561,11 +553,10 @@ class Sanic:
             warnings.warn("stop_event will be removed from future versions.",
                           DeprecationWarning)
         server_settings = self._helper(
-            host=host, port=port, debug=debug, before_start=before_start,
-            after_start=after_start, before_stop=before_stop,
-            after_stop=after_stop, ssl=ssl, sock=sock, workers=workers,
-            loop=loop, protocol=protocol, backlog=backlog,
-            register_sys_signals=register_sys_signals)
+            host=host, port=port, debug=debug, ssl=ssl, sock=sock,
+            workers=workers, protocol=protocol, backlog=backlog,
+            register_sys_signals=register_sys_signals,
+            has_log=log_config is not None)
 
         try:
             self.is_running = True
@@ -576,6 +567,7 @@ class Sanic:
         except:
             log.exception(
                 'Experienced exception while trying to serve')
+            raise
         finally:
             self.is_running = False
         log.info("Server Stopped")
@@ -589,15 +581,16 @@ class Sanic:
         return self
 
     async def create_server(self, host="127.0.0.1", port=8000, debug=False,
-                            before_start=None, after_start=None,
-                            before_stop=None, after_stop=None, ssl=None,
-                            sock=None, loop=None, protocol=None,
-                            backlog=100, stop_event=None):
+                            ssl=None, sock=None, protocol=None,
+                            backlog=100, stop_event=None,
+                            log_config=LOGGING):
         """Asynchronous version of `run`.
 
         NOTE: This does not support multiprocessing and is not the preferred
               way to run a Sanic application.
         """
+        if log_config:
+            logging.config.dictConfig(log_config)
         if protocol is None:
             protocol = (WebSocketProtocol if self.websocket_enabled
                         else HttpProtocol)
@@ -607,28 +600,48 @@ class Sanic:
             warnings.warn("stop_event will be removed from future versions.",
                           DeprecationWarning)
         server_settings = self._helper(
-            host=host, port=port, debug=debug, before_start=before_start,
-            after_start=after_start, before_stop=before_stop,
-            after_stop=after_stop, ssl=ssl, sock=sock,
-            loop=loop or get_event_loop(), protocol=protocol,
-            backlog=backlog, run_async=True)
+            host=host, port=port, debug=debug, ssl=ssl, sock=sock,
+            loop=get_event_loop(), protocol=protocol,
+            backlog=backlog, run_async=True,
+            has_log=log_config is not None)
 
         return await serve(**server_settings)
 
+    async def _run_request_middleware(self, request):
+        # The if improves speed.  I don't know why
+        if self.request_middleware:
+            for middleware in self.request_middleware:
+                response = middleware(request)
+                if isawaitable(response):
+                    response = await response
+                if response:
+                    return response
+        return None
+
+    async def _run_response_middleware(self, request, response):
+        if self.response_middleware:
+            for middleware in self.response_middleware:
+                _response = middleware(request, response)
+                if isawaitable(_response):
+                    _response = await _response
+                if _response:
+                    response = _response
+                    break
+        return response
+
     def _helper(self, host="127.0.0.1", port=8000, debug=False,
-                before_start=None, after_start=None, before_stop=None,
-                after_stop=None, ssl=None, sock=None, workers=1, loop=None,
+                ssl=None, sock=None, workers=1, loop=None,
                 protocol=HttpProtocol, backlog=100, stop_event=None,
-                register_sys_signals=True, run_async=False):
+                register_sys_signals=True, run_async=False, has_log=True):
         """Helper function used by `run` and `create_server`."""
 
         if isinstance(ssl, dict):
             # try common aliaseses
             cert = ssl.get('cert') or ssl.get('certificate')
             key = ssl.get('key') or ssl.get('keyfile')
-            if not cert and key:
+            if cert is None or key is None:
                 raise ValueError("SSLContext or certificate and key required.")
-            context = create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
+            context = create_default_context(purpose=Purpose.CLIENT_AUTH)
             context.load_cert_chain(cert, keyfile=key)
             ssl = context
         if stop_event is not None:
@@ -636,59 +649,41 @@ class Sanic:
                 warnings.simplefilter('default')
             warnings.warn("stop_event will be removed from future versions.",
                           DeprecationWarning)
-        if loop is not None:
-            if debug:
-                warnings.simplefilter('default')
-            warnings.warn("Passing a loop will be deprecated in version"
-                          " 0.4.0 https://github.com/channelcat/sanic/"
-                          "pull/335 has more information.",
-                          DeprecationWarning)
-
-        # Deprecate this
-        if any(arg is not None for arg in (after_stop, after_start,
-                                           before_start, before_stop)):
-            if debug:
-                warnings.simplefilter('default')
-            warnings.warn("Passing a before_start, before_stop, after_start or"
-                          "after_stop callback will be deprecated in next "
-                          "major version after 0.4.0",
-                          DeprecationWarning)
 
         self.error_handler.debug = debug
         self.debug = debug
 
         server_settings = {
             'protocol': protocol,
+            'request_class': self.request_class,
             'host': host,
             'port': port,
             'sock': sock,
             'ssl': ssl,
+            'signal': Signal(),
             'debug': debug,
             'request_handler': self.handle_request,
             'error_handler': self.error_handler,
             'request_timeout': self.config.REQUEST_TIMEOUT,
             'request_max_size': self.config.REQUEST_MAX_SIZE,
+            'keep_alive': self.config.KEEP_ALIVE,
             'loop': loop,
             'register_sys_signals': register_sys_signals,
-            'backlog': backlog
+            'backlog': backlog,
+            'has_log': has_log
         }
 
         # -------------------------------------------- #
         # Register start/stop events
         # -------------------------------------------- #
 
-        for event_name, settings_name, reverse, args in (
-                ("before_server_start", "before_start", False, before_start),
-                ("after_server_start", "after_start", False, after_start),
-                ("before_server_stop", "before_stop", True, before_stop),
-                ("after_server_stop", "after_stop", True, after_stop),
+        for event_name, settings_name, reverse in (
+                ("before_server_start", "before_start", False),
+                ("after_server_start", "after_start", False),
+                ("before_server_stop", "before_stop", True),
+                ("after_server_stop", "after_stop", True),
         ):
             listeners = self.listeners[event_name].copy()
-            if args:
-                if callable(args):
-                    listeners.append(args)
-                else:
-                    listeners.extend(args)
             if reverse:
                 listeners.reverse()
             # Prepend sanic to the arguments when listeners are triggered

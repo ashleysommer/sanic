@@ -9,35 +9,63 @@ from sanic.exceptions import (
     SanicException,
     TRACEBACK_LINE_HTML,
     TRACEBACK_STYLE,
-    TRACEBACK_WRAPPER_HTML)
+    TRACEBACK_WRAPPER_HTML,
+    TRACEBACK_WRAPPER_INNER_HTML,
+    TRACEBACK_BORDER)
 from sanic.log import log
 from sanic.response import text, html
 
 
 class ErrorHandler:
     handlers = None
+    cached_handlers = None
+    _missing = object()
 
     def __init__(self):
-        self.handlers = {}
+        self.handlers = []
+        self.cached_handlers = {}
         self.debug = False
 
-    def _render_traceback_html(self, exception, request):
-        exc_type, exc_value, tb = sys.exc_info()
-        frames = extract_tb(tb)
+    def _render_exception(self, exception):
+        frames = extract_tb(exception.__traceback__)
 
         frame_html = []
         for frame in frames:
             frame_html.append(TRACEBACK_LINE_HTML.format(frame))
 
+        return TRACEBACK_WRAPPER_INNER_HTML.format(
+            exc_name=exception.__class__.__name__,
+            exc_value=exception,
+            frame_html=''.join(frame_html))
+
+    def _render_traceback_html(self, exception, request):
+        exc_type, exc_value, tb = sys.exc_info()
+        exceptions = []
+
+        while exc_value:
+            exceptions.append(self._render_exception(exc_value))
+            exc_value = exc_value.__cause__
+
         return TRACEBACK_WRAPPER_HTML.format(
             style=TRACEBACK_STYLE,
-            exc_name=exc_type.__name__,
-            exc_value=exc_value,
-            frame_html=''.join(frame_html),
+            exc_name=exception.__class__.__name__,
+            exc_value=exception,
+            inner_html=TRACEBACK_BORDER.join(reversed(exceptions)),
             path=request.path)
 
     def add(self, exception, handler):
-        self.handlers[exception] = handler
+        self.handlers.append((exception, handler))
+
+    def lookup(self, exception):
+        handler = self.cached_handlers.get(exception, self._missing)
+        if handler is self._missing:
+            for exception_class, handler in self.handlers:
+                if isinstance(exception, exception_class):
+                    self.cached_handlers[type(exception)] = handler
+                    return handler
+            self.cached_handlers[type(exception)] = None
+            handler = None
+        return handler
 
     def response(self, request, exception):
         """Fetches and executes an exception handler and returns a response
@@ -47,9 +75,13 @@ class ErrorHandler:
         :param exception: Exception to handle
         :return: Response object
         """
-        handler = self.handlers.get(type(exception), self.default)
+        handler = self.lookup(exception)
+        response = None
         try:
-            response = handler(request=request, exception=exception)
+            if handler:
+                response = handler(request=request, exception=exception)
+            if response is None:
+                response = self.default(request=request, exception=exception)
         except Exception:
             self.log(format_exc())
             if self.debug:

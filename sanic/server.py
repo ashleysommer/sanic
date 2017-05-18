@@ -1,17 +1,19 @@
 import asyncio
 import os
 import traceback
-import warnings
 from functools import partial
 from inspect import isawaitable
 from multiprocessing import Process
-from os import set_inheritable
 from signal import (
     SIGTERM, SIGINT,
     signal as signal_func,
     Signals
 )
-from socket import socket, SOL_SOCKET, SO_REUSEADDR
+from socket import (
+    socket,
+    SOL_SOCKET,
+    SO_REUSEADDR,
+)
 from time import time
 
 from httptools import HttpRequestParser
@@ -22,7 +24,8 @@ try:
 except ImportError:
     async_loop = asyncio
 
-from sanic.log import log
+from sanic.log import log, netlog
+from sanic.response import HTTPResponse
 from sanic.request import Request
 from sanic.exceptions import (
     RequestTimeout, PayloadTooLarge, InvalidUsage, ServerError)
@@ -61,12 +64,16 @@ class HttpProtocol(asyncio.Protocol):
         'parser', 'request', 'url', 'headers',
         # request config
         'request_handler', 'request_timeout', 'request_max_size',
+        'request_class',
+        # enable or disable access log / error log purpose
+        'has_log',
         # connection management
         '_total_request_size', '_timeout_handler', '_last_communication_time')
 
     def __init__(self, *, loop, request_handler, error_handler,
                  signal=Signal(), connections=set(), request_timeout=60,
-                 request_max_size=None):
+                 request_max_size=None, request_class=None, has_log=True,
+                 keep_alive=True):
         self.loop = loop
         self.transport = None
         self.request = None
@@ -74,15 +81,24 @@ class HttpProtocol(asyncio.Protocol):
         self.url = None
         self.headers = None
         self.signal = signal
+        self.has_log = has_log
         self.connections = connections
         self.request_handler = request_handler
         self.error_handler = error_handler
         self.request_timeout = request_timeout
         self.request_max_size = request_max_size
+        self.request_class = request_class or Request
         self._total_request_size = 0
         self._timeout_handler = None
         self._last_request_time = None
         self._request_handler_task = None
+        self._keep_alive = keep_alive
+
+    @property
+    def keep_alive(self):
+        return (self._keep_alive
+                and not self.signal.stopped
+                and self.parser.should_keep_alive())
 
     # -------------------------------------------- #
     # Connection
@@ -148,7 +164,7 @@ class HttpProtocol(asyncio.Protocol):
         self.headers.append((name.decode().casefold(), value.decode()))
 
     def on_headers_complete(self):
-        self.request = Request(
+        self.request = self.request_class(
             url_bytes=self.url,
             headers=CIDict(self.headers),
             version=self.parser.get_http_version(),
@@ -160,8 +176,7 @@ class HttpProtocol(asyncio.Protocol):
         self.request.body.append(body)
 
     def on_message_complete(self):
-        if self.request.body:
-            self.request.body = b''.join(self.request.body)
+        self.request.body = b''.join(self.request.body)
 
         self._request_handler_task = self.loop.create_task(
             self.request_handler(
@@ -177,13 +192,19 @@ class HttpProtocol(asyncio.Protocol):
         Writes response content synchronously to the transport.
         """
         try:
-            keep_alive = (
-                self.parser.should_keep_alive() and not self.signal.stopped)
-
+            keep_alive = self.keep_alive
             self.transport.write(
                 response.output(
                     self.request.version, keep_alive,
                     self.request_timeout))
+            if self.has_log:
+                netlog.info('', extra={
+                    'status': response.status,
+                    'byte': len(response.body),
+                    'host': '%s:%d' % (self.request.ip[0], self.request.ip[1]),
+                    'request': '%s %s' % (self.request.method,
+                                          self.request.url)
+                })
         except AttributeError:
             log.error(
                 ('Invalid response object for url {}, '
@@ -213,12 +234,18 @@ class HttpProtocol(asyncio.Protocol):
         """
 
         try:
-            keep_alive = (
-                self.parser.should_keep_alive() and not self.signal.stopped)
-
+            keep_alive = self.keep_alive
             response.transport = self.transport
             await response.stream(
                 self.request.version, keep_alive, self.request_timeout)
+            if self.has_log:
+                netlog.info('', extra={
+                    'status': response.status,
+                    'byte': -1,
+                    'host': '%s:%d' % self.request.ip,
+                    'request': '%s %s' % (self.request.method,
+                                          self.request.url)
+                })
         except AttributeError:
             log.error(
                 ('Invalid response object for url {}, '
@@ -254,6 +281,21 @@ class HttpProtocol(asyncio.Protocol):
                 "Writing error failed, connection closed {}".format(repr(e)),
                 from_error=True)
         finally:
+            if self.has_log:
+                extra = {
+                    'status': response.status,
+                    'host': '',
+                    'request': str(self.request) + str(self.url)
+                }
+                if response and isinstance(response, HTTPResponse):
+                    extra['byte'] = len(response.body)
+                else:
+                    extra['byte'] = -1
+                if self.request:
+                    extra['host'] = '%s:%d' % self.request.ip,
+                    extra['request'] = '%s %s' % (self.request.method,
+                                                  self.url)
+                netlog.info('', extra=extra)
             self.transport.close()
 
     def bail_out(self, message, from_error=False):
@@ -317,7 +359,7 @@ def serve(host, port, request_handler, error_handler, before_start=None,
           request_timeout=60, ssl=None, sock=None, request_max_size=None,
           reuse_port=False, loop=None, protocol=HttpProtocol, backlog=100,
           register_sys_signals=True, run_async=False, connections=None,
-          signal=Signal()):
+          signal=Signal(), request_class=None, has_log=True, keep_alive=True):
     """Start asynchronous HTTP Server on an individual process.
 
     :param host: Address to host on
@@ -342,6 +384,8 @@ def serve(host, port, request_handler, error_handler, before_start=None,
     :param reuse_port: `True` for multiple workers
     :param loop: asyncio compatible event loop
     :param protocol: subclass of asyncio protocol class
+    :param request_class: Request class to use
+    :param has_log: disable/enable access log and error log
     :return: Nothing
     """
     if not run_async:
@@ -363,6 +407,9 @@ def serve(host, port, request_handler, error_handler, before_start=None,
         error_handler=error_handler,
         request_timeout=request_timeout,
         request_max_size=request_max_size,
+        request_class=request_class,
+        has_log=has_log,
+        keep_alive=keep_alive,
     )
 
     server_coroutine = loop.create_server(
@@ -433,12 +480,6 @@ def serve_multiple(server_settings, workers):
     :param stop_event: if provided, is used as a stop signal
     :return:
     """
-    if server_settings.get('loop', None) is not None:
-        if server_settings.get('debug', False):
-            warnings.simplefilter('default')
-        warnings.warn("Passing a loop will be deprecated in version 0.4.0"
-                      " https://github.com/channelcat/sanic/pull/335"
-                      " has more information.", DeprecationWarning)
     server_settings['reuse_port'] = True
 
     # Handling when custom socket is not provided.
@@ -446,7 +487,7 @@ def serve_multiple(server_settings, workers):
         sock = socket()
         sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         sock.bind((server_settings['host'], server_settings['port']))
-        set_inheritable(sock.fileno(), True)
+        sock.set_inheritable(True)
         server_settings['sock'] = sock
         server_settings['host'] = None
         server_settings['port'] = None
@@ -454,6 +495,8 @@ def serve_multiple(server_settings, workers):
     def sig_handler(signal, frame):
         log.info("Received signal {}. Shutting down.".format(
             Signals(signal).name))
+        for process in processes:
+            os.kill(process.pid, SIGINT)
 
     signal_func(SIGINT, lambda s, f: sig_handler(s, f))
     signal_func(SIGTERM, lambda s, f: sig_handler(s, f))
@@ -472,5 +515,3 @@ def serve_multiple(server_settings, workers):
     for process in processes:
         process.terminate()
     server_settings.get('sock').close()
-
-    asyncio.get_event_loop().stop()
